@@ -1,26 +1,30 @@
 ---
 name: claude-desktop-code-session-restore
-description: Restore Claude Desktop Code sessions across Claude accounts or user-data profiles. Use when the user wants a newly logged-in Claude Desktop Code account to see previous active Code sessions, migrate or restore Claude Desktop Code session lists, copy local Code transcripts, or inspect/repair claude-code-sessions and ~/.claude/projects. This is for Claude Desktop Code, not ordinary Claude Chat history.
+description: Restore Claude Desktop Code sessions across Claude accounts or user-data profiles on macOS. Use when the user wants a newly logged-in Claude Desktop Code account to see previous active Code sessions, migrate or restore Claude Desktop Code session lists, copy local Code transcripts, or inspect/repair claude-code-sessions and ~/.claude/projects. This is for Claude Desktop Code, not ordinary Claude Chat history.
 ---
 
 # Claude Desktop Code Session Restore
 
 ## Purpose
 
-Use this skill to make Claude Desktop's Code tab show prior local Code sessions after switching Claude accounts or user-data profiles. The workflow only touches Code session metadata and local transcripts.
+Use this skill to make Claude Desktop's Code tab show prior local Code sessions after switching Claude accounts or user-data profiles on macOS. The workflow only touches Code session metadata and local transcripts.
+
+This release is macOS-only. If the user is not on macOS, do not run restore commands unless they explicitly accept unsupported experimental use with explicit paths.
 
 Never copy or modify Claude Desktop login state:
 
 - Do not copy `Cookies`, `Local Storage`, `IndexedDB`, `Session Storage`, `config.json`, or OAuth/token files.
 - Do not claim this migrates ordinary Claude Chat history.
 - Do not treat live background processes as migrated; only the Code transcript and session index are bridged.
+- Do not paste real account IDs, workspace IDs, `local_*.json` names, `cliSessionId` values, transcript text, or private `/Users/<name>/...` paths into public output.
 
-## Storage Model
+## macOS Storage Model
 
 Claude Desktop Code uses two local layers:
 
 - Session index: `~/Library/Application Support/Claude/claude-code-sessions/<accountId>/<workspaceId>/local_*.json`
 - Transcript data: `~/.claude/projects/<encoded-cwd>/<cliSessionId>.jsonl`
+- Tool state and backups: `~/.claude-desktop-code-session-restore/`
 
 The `local_*.json` files make sessions appear in the Code tab. The `.jsonl` files hold the actual transcript. Both must be present for a restored session to be useful.
 
@@ -97,7 +101,7 @@ python3 scripts/claude_desktop_code_session_restore.py register-profile \
 ## Commands
 
 - `scan`: show known app-support directories, transcript roots, target index, and session counts.
-- `snapshot --register`: copy current `claude-code-sessions` and `projects` into `~/.claude-code-session-bridge/pre-switch-backups/` and register the snapshot as a future source.
+- `snapshot --register`: copy current `claude-code-sessions` and `projects` into `~/.claude-desktop-code-session-restore/pre-switch-backups/` and register the snapshot as a future source.
 - `sync`: copy active source `local_*.json` session indexes into the current target account and copy matching transcripts when needed.
 - `verify`: check that target session indexes have matching nonempty `.jsonl` transcripts.
 - `self-test`: run an isolated temp-directory migration test without touching real Claude data.

@@ -23,8 +23,13 @@ def default_app_support_dir() -> Path:
 
 DEFAULT_APP_SUPPORT = default_app_support_dir()
 DEFAULT_CLAUDE_CONFIG = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
-DEFAULT_BRIDGE_ROOT = Path.home() / ".claude-code-session-bridge"
-VERSION = "0.1.0"
+DEFAULT_STATE_ROOT = Path(
+    os.environ.get(
+        "CLAUDE_DESKTOP_CODE_SESSION_RESTORE_HOME",
+        Path.home() / ".claude-desktop-code-session-restore",
+    )
+)
+VERSION = "0.1.1"
 
 
 @dataclass(frozen=True)
@@ -640,13 +645,13 @@ def sync(args: argparse.Namespace) -> int:
 def self_test(args: argparse.Namespace) -> int:
     import tempfile
 
-    with tempfile.TemporaryDirectory(prefix="ccsb-self-test-") as raw_tmp:
+    with tempfile.TemporaryDirectory(prefix="cdcsr-self-test-") as raw_tmp:
         tmp = Path(raw_tmp)
         source_app = tmp / "source-app"
         source_config = tmp / "source-config"
         target_app = tmp / "target-app"
         target_config = tmp / "target-config"
-        bridge_root = tmp / "bridge"
+        state_root = tmp / "state"
         source_index = source_app / "claude-code-sessions" / "old-account" / "old-workspace"
         target_index = target_app / "claude-code-sessions" / "new-account" / "new-workspace"
         source_project = source_config / "projects" / "-tmp-project"
@@ -671,7 +676,7 @@ def self_test(args: argparse.Namespace) -> int:
         )
 
         sync_args = argparse.Namespace(
-            bridge_root=str(bridge_root),
+            bridge_root=str(state_root),
             target_app_support_dir=str(target_app),
             target_claude_config_dir=str(target_config),
             target_index="",
@@ -700,10 +705,22 @@ def self_test(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Bridge Claude Desktop Code session indexes and transcripts across accounts."
+        description="Restore Claude Desktop Code session indexes and transcripts across accounts on macOS."
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
-    parser.add_argument("--bridge-root", default=str(DEFAULT_BRIDGE_ROOT))
+    parser.add_argument(
+        "--state-root",
+        dest="bridge_root",
+        default=str(DEFAULT_STATE_ROOT),
+        metavar="STATE_ROOT",
+        help="Directory for restore state, backups, and registered source profiles.",
+    )
+    parser.add_argument("--bridge-root", dest="bridge_root", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--allow-unsupported-platform",
+        action="store_true",
+        help="Run outside macOS anyway. This is untested; prefer explicit profile paths.",
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     def common(p: argparse.ArgumentParser) -> None:
@@ -734,7 +751,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify.add_argument("--session", default="", help="Verify only this local session id or cliSessionId.")
     p_verify.set_defaults(func=verify)
 
-    p_snapshot = sub.add_parser("snapshot", help="Back up the current Claude Code index and transcripts.")
+    p_snapshot = sub.add_parser("snapshot", help="Back up the current Claude Desktop Code index and transcripts.")
     p_snapshot.add_argument("--target-app-support-dir", default=str(DEFAULT_APP_SUPPORT))
     p_snapshot.add_argument("--target-claude-config-dir", default=str(DEFAULT_CLAUDE_CONFIG))
     p_snapshot.add_argument("--name", default="")
@@ -758,6 +775,16 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if sys.platform != "darwin" and args.cmd != "self-test":
+        if not args.allow_unsupported_platform:
+            raise SystemExit(
+                "This release is macOS-only. Run self-test anywhere, or pass "
+                "--allow-unsupported-platform with explicit profile paths if you are intentionally experimenting."
+            )
+        print(
+            "warning: non-macOS execution is unsupported in this release; use explicit profile paths and verify carefully",
+            file=sys.stderr,
+        )
     return args.func(args)
 
 

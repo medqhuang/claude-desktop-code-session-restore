@@ -1,6 +1,6 @@
 # Claude Desktop Code Session Restore
 
-Restore Claude Desktop **Code** sessions after switching Claude accounts or Desktop profiles, without copying login state.
+Restore Claude Desktop **Code** sessions on macOS after switching Claude accounts or Desktop profiles, without copying login state.
 
 This repository contains:
 
@@ -8,6 +8,14 @@ This repository contains:
 - a standalone Python restore utility (`scripts/claude_desktop_code_session_restore.py`)
 
 It is for Claude Desktop's **Code** tab. It does not migrate ordinary Claude Chat history.
+
+## Support Status
+
+This release is **macOS-only**.
+
+It was built and tested against Claude Desktop for macOS, where Code sessions are stored under `~/Library/Application Support/Claude` and transcripts are stored under `~/.claude/projects`.
+
+Windows and Linux are not supported in this release. The script intentionally refuses non-macOS restore commands unless you pass `--allow-unsupported-platform`; treat that as experimental and use explicit paths.
 
 ## Why This Exists
 
@@ -34,6 +42,7 @@ Example prompt:
 
 ```text
 Read ./SKILL.md and use this repo to restore my previous Claude Desktop Code sessions into the current Claude account.
+I am on macOS.
 Do not copy cookies, IndexedDB, Local Storage, or any login state.
 First snapshot the old account/profile, then after I log into the new account and create one blank Code session, run the sync and verify steps.
 ```
@@ -60,7 +69,7 @@ sync
 verify
 ```
 
-## Manual Quick Start
+## Manual Quick Start For macOS
 
 Clone the repo:
 
@@ -102,26 +111,12 @@ Reopen Claude Desktop. Old Code sessions should now appear in the new account's 
 
 ## How It Works
 
-Claude Desktop Code uses two local storage layers.
+Claude Desktop Code on macOS uses two local storage layers.
 
 ### 1. Desktop Code sidebar index
 
-On macOS:
-
 ```text
 ~/Library/Application Support/Claude/claude-code-sessions/<accountId>/<workspaceId>/local_*.json
-```
-
-On Windows:
-
-```text
-%APPDATA%\Claude\claude-code-sessions\<accountId>\<workspaceId>\local_*.json
-```
-
-On Linux:
-
-```text
-~/.config/Claude/claude-code-sessions/<accountId>/<workspaceId>/local_*.json
 ```
 
 Each `local_*.json` file is one sidebar entry. The key field is `cliSessionId`:
@@ -130,7 +125,7 @@ Each `local_*.json` file is one sidebar entry. The key field is `cliSessionId`:
 {
   "sessionId": "local_<desktop-session-id>",
   "cliSessionId": "<transcript-id>",
-  "title": "Review roadmap and task consolidation",
+  "title": "Example Code session",
   "cwd": "/path/to/project",
   "lastActivityAt": 1781144564263,
   "isArchived": false
@@ -165,7 +160,29 @@ Never copied:
 - OAuth tokens
 - ordinary Claude Chat history
 
+## Privacy And Redaction
+
+The repository documentation uses placeholders such as `<accountId>`, `<workspaceId>`, `<cliSessionId>`, and `/path/to/project`. It should not contain real local paths, real Claude account names, real workspace IDs, or real session IDs.
+
+When opening an issue or sharing logs, redact:
+
+- your macOS username from `/Users/<you>/...` paths
+- Claude account IDs and workspace IDs under `claude-code-sessions/`
+- `local_*.json` filenames if they contain real session identifiers
+- `cliSessionId` values and `.jsonl` filenames
+- project `cwd` values if the path or folder name is private
+- transcript contents from `~/.claude/projects/**/*.jsonl`
+
+`scan`, `sync --dry-run`, and `verify` may print local paths. That output is useful for debugging, but it is not automatically sanitized.
+
 ## Command Reference
+
+Global options must appear before the subcommand:
+
+```bash
+python3 scripts/claude_desktop_code_session_restore.py --state-root <path> sync --dry-run
+python3 scripts/claude_desktop_code_session_restore.py --allow-unsupported-platform scan --target-app-support-dir <path> --target-claude-config-dir <path>
+```
 
 ### `snapshot`
 
@@ -178,7 +195,7 @@ python3 scripts/claude_desktop_code_session_restore.py snapshot --register
 The snapshot is written to:
 
 ```text
-~/.claude-code-session-bridge/pre-switch-backups/<name>/
+~/.claude-desktop-code-session-restore/pre-switch-backups/<name>/
 ```
 
 Use this before logging out of the old account.
@@ -270,8 +287,25 @@ python3 scripts/claude_desktop_code_session_restore.py self-test
 Backups are written under:
 
 ```text
-~/.claude-code-session-bridge/backups/
+~/.claude-desktop-code-session-restore/backups/
 ```
+
+The tool also stores registered source profiles under:
+
+```text
+~/.claude-desktop-code-session-restore/profiles.json
+```
+
+That file contains local paths only. It does not contain cookies, tokens, or transcript text.
+
+## Common Failure Points
+
+- Claude Desktop must be fully quit before `snapshot` and `sync`; otherwise Desktop can overwrite or race the local index files.
+- The new account must create one blank Code session first. This gives the script a concrete target `<accountId>/<workspaceId>` directory.
+- If `scan` shows no source sessions, snapshot the old account before logging out, or register an old profile with explicit paths.
+- If `sync` imports zero sessions, they may already exist in the target, be archived, or be missing transcripts. Use `--include-archived` only if you intentionally want archived sessions.
+- If restored sessions appear but cannot resume, run `verify` and check for missing or empty `.jsonl` transcript files.
+- MCP servers, OAuth credentials, and remote resources are not migrated. Re-authorize them in the new account if a restored session needs them.
 
 ## What This Cannot Restore
 
@@ -315,22 +349,24 @@ Use $claude-desktop-code-session-restore to restore my previous Claude Desktop C
 Current version:
 
 ```text
-0.1.0
+0.1.1
 ```
 
-Tested locally on:
+Supported and tested on:
 
-- macOS
+- macOS only
 - Claude Desktop Code storage using `claude-code-sessions/<accountId>/<workspaceId>/local_*.json`
 - Claude Code transcripts under `~/.claude/projects/<encoded-cwd>/<cliSessionId>.jsonl`
 
-The script has default path detection for macOS, Windows, and Linux. The storage layout is not a public stable API, so always run:
+The storage layout is not a public stable API. Always run:
 
 ```bash
 python3 scripts/claude_desktop_code_session_restore.py self-test
 python3 scripts/claude_desktop_code_session_restore.py sync --dry-run
 python3 scripts/claude_desktop_code_session_restore.py verify
 ```
+
+On non-macOS systems, restore commands fail fast by default. You can pass `--allow-unsupported-platform` for experiments with explicit paths, but that path is not supported by this release.
 
 ## Related Work
 
