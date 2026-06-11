@@ -1,6 +1,6 @@
 # Claude Desktop Code Session Restore
 
-Restore Claude Desktop **Code** sessions on macOS after switching Claude accounts or Desktop profiles, without copying login state.
+Restore Claude Desktop **Code** sessions on macOS after switching Claude accounts or Desktop profiles, or make plain Claude Code CLI sessions appear in Claude Desktop Code, without copying login state.
 
 This repository contains:
 
@@ -28,7 +28,7 @@ Typical situation:
 - The old transcripts still exist under `~/.claude/projects/`.
 - Copying `Cookies`, `IndexedDB`, or `Local Storage` would also copy login state, which is the wrong fix.
 
-This tool restores the local Code sidebar by copying only the Code session index and matching JSONL transcripts.
+This tool restores the local Code sidebar by copying or creating only the Code session index and matching JSONL transcripts.
 
 ## Fastest Use: Let an AI Agent Run It
 
@@ -67,6 +67,16 @@ scan
 sync --dry-run
 sync
 verify
+```
+
+To adopt a plain Claude Code CLI session into Claude Desktop Code, use:
+
+```text
+Read ./SKILL.md and use this repo to make my Claude Code CLI session appear in Claude Desktop Code.
+I am on macOS.
+The CLI session id is <cliSessionId>.
+Do not copy cookies, IndexedDB, Local Storage, or any login state.
+Run adopt-cli with a dry run first, then ask me to quit Claude Desktop before writing the Desktop Code index.
 ```
 
 ## Manual Quick Start For macOS
@@ -109,6 +119,21 @@ python3 scripts/claude_desktop_code_session_restore.py verify
 
 Reopen Claude Desktop. Old Code sessions should now appear in the new account's Code sidebar.
 
+To adopt one plain Claude Code CLI session into Desktop Code:
+
+```bash
+python3 scripts/claude_desktop_code_session_restore.py adopt-cli --session <cliSessionId> --dry-run
+```
+
+Fully quit Claude Desktop, then run:
+
+```bash
+python3 scripts/claude_desktop_code_session_restore.py adopt-cli --session <cliSessionId>
+python3 scripts/claude_desktop_code_session_restore.py verify --session <cliSessionId>
+```
+
+`<cliSessionId>` is the `.jsonl` filename without `.jsonl` under `~/.claude/projects/<encoded-cwd>/`.
+
 ## How It Works
 
 Claude Desktop Code on macOS uses two local storage layers.
@@ -142,14 +167,18 @@ The actual conversation transcript is stored as JSONL:
 
 The Desktop sidebar file points at the transcript through `cliSessionId`. If the transcript exists but the sidebar index does not, the session can be missing from Claude Desktop even though the work is still on disk.
 
-This tool copies source `local_*.json` files into the current target account's index directory and ensures the matching `.jsonl` files are present.
+For account/profile restore, this tool copies source `local_*.json` files into the current target account's index directory and ensures the matching `.jsonl` files are present.
+
+For CLI adoption, this tool reads an existing `.jsonl` transcript, derives a new Desktop `local_*.json` sidebar entry from the current target account's own Desktop template, and points that entry at the existing transcript through `cliSessionId`.
 
 ## What Gets Copied
 
-Copied or verified:
+Copied, created, or verified:
 
 - `claude-code-sessions/<accountId>/<workspaceId>/local_*.json`
 - `~/.claude/projects/<encoded-cwd>/<cliSessionId>.jsonl`
+
+`sync` copies existing Desktop `local_*.json` entries from another account/profile. `adopt-cli` creates new `local_*.json` entries for CLI-only transcripts. If the CLI transcript already lives under the target `~/.claude/projects`, the transcript is not copied; the new Desktop index simply points at it.
 
 Never copied:
 
@@ -242,6 +271,47 @@ Useful options:
 --source-claude-config-dir <path>
 ```
 
+### `adopt-cli`
+
+Create Desktop Code sidebar entries for plain Claude Code CLI JSONL transcripts.
+
+```bash
+python3 scripts/claude_desktop_code_session_restore.py adopt-cli --session <cliSessionId> --dry-run
+python3 scripts/claude_desktop_code_session_restore.py adopt-cli --session <cliSessionId>
+```
+
+Adopt several specific CLI sessions:
+
+```bash
+python3 scripts/claude_desktop_code_session_restore.py adopt-cli \
+  --session <cliSessionId-1> \
+  --session <cliSessionId-2>
+```
+
+Adopt every non-indexed CLI transcript only when you really mean it:
+
+```bash
+python3 scripts/claude_desktop_code_session_restore.py adopt-cli --all --dry-run
+python3 scripts/claude_desktop_code_session_restore.py adopt-cli --all
+```
+
+Useful options:
+
+```bash
+--source-claude-config-dir <path>
+--overwrite-transcript
+--allow-missing-cwd
+--limit <n>
+--ignore-running
+```
+
+Notes:
+
+- `adopt-cli` refuses to run without either `--session <cliSessionId>` or explicit `--all`.
+- It uses the newest target Desktop `local_*.json` as a schema template, then replaces `sessionId`, `cliSessionId`, title, cwd, timestamps, and turn count.
+- It skips CLI transcripts that are already indexed in the target Desktop account.
+- It skips empty transcripts and, by default, transcripts without a `cwd` field.
+
 ### `verify`
 
 Check that target sidebar entries point to nonempty JSONL transcripts.
@@ -277,8 +347,8 @@ python3 scripts/claude_desktop_code_session_restore.py self-test
 
 ## Safety Model
 
-- `snapshot` and `sync` refuse to run while the Claude Desktop main process appears to be running.
-- `sync` backs up the target index before writing.
+- `snapshot`, `sync`, and real `adopt-cli` writes refuse to run while the Claude Desktop main process appears to be running. `adopt-cli --dry-run` is read-only.
+- `sync` and `adopt-cli` back up the target index before writing.
 - Existing target files are not overwritten unless you pass an explicit overwrite flag.
 - Archived sessions are skipped by default.
 - Sessions with missing transcripts are skipped by default.
@@ -305,6 +375,8 @@ That file contains local paths only. It does not contain cookies, tokens, or tra
 - If `scan` shows no source sessions, snapshot the old account before logging out, or register an old profile with explicit paths.
 - If `sync` imports zero sessions, they may already exist in the target, be archived, or be missing transcripts. Use `--include-archived` only if you intentionally want archived sessions.
 - If restored sessions appear but cannot resume, run `verify` and check for missing or empty `.jsonl` transcript files.
+- For `adopt-cli`, the target account must already have at least one blank Desktop Code session. The tool uses it as a safe schema template.
+- For `adopt-cli`, use the JSONL filename stem as `<cliSessionId>`, not the Desktop `local_...` id.
 - MCP servers, OAuth credentials, and remote resources are not migrated. Re-authorize them in the new account if a restored session needs them.
 
 ## What This Cannot Restore
@@ -349,7 +421,7 @@ Use $claude-desktop-code-session-restore to restore my previous Claude Desktop C
 Current version:
 
 ```text
-0.1.1
+0.2.0
 ```
 
 Supported and tested on:
@@ -357,13 +429,20 @@ Supported and tested on:
 - macOS only
 - Claude Desktop Code storage using `claude-code-sessions/<accountId>/<workspaceId>/local_*.json`
 - Claude Code transcripts under `~/.claude/projects/<encoded-cwd>/<cliSessionId>.jsonl`
+- CLI-only Claude Code JSONL adoption into Desktop Code via `adopt-cli`
 
-The storage layout is not a public stable API. Always run:
+The storage layout is not a public stable API. Always run the relevant checks:
 
 ```bash
 python3 scripts/claude_desktop_code_session_restore.py self-test
 python3 scripts/claude_desktop_code_session_restore.py sync --dry-run
 python3 scripts/claude_desktop_code_session_restore.py verify
+```
+
+For CLI adoption, replace the sync dry-run with:
+
+```bash
+python3 scripts/claude_desktop_code_session_restore.py adopt-cli --session <cliSessionId> --dry-run
 ```
 
 On non-macOS systems, restore commands fail fast by default. You can pass `--allow-unsupported-platform` for experiments with explicit paths, but that path is not supported by this release.

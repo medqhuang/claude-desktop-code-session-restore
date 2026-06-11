@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,7 +30,7 @@ DEFAULT_STATE_ROOT = Path(
         Path.home() / ".claude-desktop-code-session-restore",
     )
 )
-VERSION = "0.1.1"
+VERSION = "0.2.0"
 
 
 @dataclass(frozen=True)
@@ -81,12 +82,39 @@ class SessionRecord:
         return str(value) if value else ""
 
 
+@dataclass
+class CliTranscript:
+    cli_session_id: str
+    path: Path
+    cwd: str | None
+    title: str
+    title_source: str
+    created_at: int
+    last_activity_at: int
+    completed_turns: int
+    line_count: int
+
+
 def expand_path(raw: str | os.PathLike[str]) -> Path:
     return Path(raw).expanduser().resolve()
 
 
 def stamp() -> str:
     return dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def timestamp_to_ms(value: object, fallback: int) -> int:
+    if isinstance(value, int):
+        return value if value > 10_000_000_000 else value * 1000
+    if isinstance(value, float):
+        raw = int(value)
+        return raw if raw > 10_000_000_000 else raw * 1000
+    if isinstance(value, str) and value:
+        try:
+            return int(dt.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp() * 1000)
+        except ValueError:
+            return fallback
+    return fallback
 
 
 def sha256(path: Path) -> str:
@@ -386,6 +414,63 @@ def build_transcript_map(project_roots: list[Path]) -> dict[str, Path]:
     return by_id
 
 
+def parse_cli_transcript(path: Path) -> CliTranscript | None:
+    if not path.exists() or path.stat().st_size == 0:
+        return None
+
+    fallback_ms = int(path.stat().st_mtime * 1000)
+    first_seen_ms: int | None = None
+    last_seen_ms: int | None = None
+    cwd: str | None = None
+    ai_title: str | None = None
+    custom_title: str | None = None
+    completed_turns = 0
+    line_count = 0
+
+    with path.open("r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(item, dict):
+                continue
+            line_count += 1
+
+            raw_ts = item.get("timestamp")
+            ts_ms = timestamp_to_ms(raw_ts, fallback_ms)
+            first_seen_ms = ts_ms if first_seen_ms is None else min(first_seen_ms, ts_ms)
+            last_seen_ms = ts_ms if last_seen_ms is None else max(last_seen_ms, ts_ms)
+
+            if not cwd and isinstance(item.get("cwd"), str) and item["cwd"]:
+                cwd = item["cwd"]
+
+            item_type = item.get("type")
+            if item_type == "assistant":
+                completed_turns += 1
+            elif item_type == "ai-title" and isinstance(item.get("aiTitle"), str) and item["aiTitle"]:
+                ai_title = item["aiTitle"]
+            elif item_type == "custom-title" and isinstance(item.get("customTitle"), str) and item["customTitle"]:
+                custom_title = item["customTitle"]
+
+    if line_count == 0:
+        return None
+
+    title = custom_title or ai_title or f"Claude Code session {path.stem[:8]}"
+    title_source = "custom" if custom_title else "auto"
+    return CliTranscript(
+        cli_session_id=path.stem,
+        path=path,
+        cwd=cwd,
+        title=title,
+        title_source=title_source,
+        created_at=first_seen_ms if first_seen_ms is not None else fallback_ms,
+        last_activity_at=last_seen_ms if last_seen_ms is not None else fallback_ms,
+        completed_turns=completed_turns,
+        line_count=line_count,
+    )
+
+
 def find_transcript(cli_session_id: str, project_roots: list[Path]) -> Path | None:
     for root in project_roots:
         if not root.exists():
@@ -457,6 +542,100 @@ def copy_transcript(
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dest)
     return "transcript-overwritten" if existed_before else "transcript-copied"
+
+
+def newest_template_record(target: IndexDir) -> SessionRecord:
+    sessions = load_sessions([target], include_archived=True)
+    if not sessions:
+        raise SystemExit(
+            "Target index has no local_*.json template. Open Claude Desktop Code, "
+            "create one blank session in the target account, fully quit Claude Desktop, then rerun."
+        )
+    return sessions[0]
+
+
+def build_desktop_index_from_cli(transcript: CliTranscript, template: SessionRecord) -> tuple[str, dict]:
+    local_session_id = f"local_{uuid.uuid4()}"
+    cwd = transcript.cwd or str(Path.home())
+    record = dict(template.data)
+    record.update(
+        {
+            "sessionId": local_session_id,
+            "cliSessionId": transcript.cli_session_id,
+            "title": transcript.title,
+            "titleSource": transcript.title_source,
+            "cwd": cwd,
+            "originCwd": cwd,
+            "createdAt": transcript.created_at,
+            "lastActivityAt": transcript.last_activity_at,
+            "lastFocusedAt": transcript.last_activity_at,
+            "completedTurns": transcript.completed_turns,
+            "isArchived": False,
+        }
+    )
+
+    # These fields are specific to scheduled/running Desktop tasks and should
+    # not be inherited when adopting a plain CLI transcript.
+    for key in ("scheduledTaskId", "planPath"):
+        record.pop(key, None)
+    return local_session_id, record
+
+
+def copy_cli_transcript_to_target(
+    transcript: CliTranscript,
+    project_roots: list[Path],
+    target_projects: Path,
+    args: argparse.Namespace,
+) -> str:
+    source_root = next(
+        (root for root in project_roots if root.exists() and path_is_relative_to(transcript.path, root)),
+        None,
+    )
+    rel = safe_rel(transcript.path, source_root) if source_root else Path(transcript.path.name)
+    dest = target_projects / rel
+    existed_before = dest.exists()
+
+    if dest.resolve() == transcript.path.resolve():
+        return "transcript-already-in-target"
+    if dest.exists():
+        if same_file_content(transcript.path, dest):
+            return "transcript-exists-identical"
+        if not args.overwrite_transcript:
+            return "transcript-conflict"
+
+    if args.dry_run:
+        action = "overwrite" if dest.exists() else "copy"
+        print(f"dry-run: would {action} transcript {transcript.path} -> {dest}")
+        return "transcript-copied"
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(transcript.path, dest)
+    return "transcript-overwritten" if existed_before else "transcript-copied"
+
+
+def write_adopted_index(
+    transcript: CliTranscript,
+    target: IndexDir,
+    template: SessionRecord,
+    args: argparse.Namespace,
+) -> str:
+    local_session_id, record = build_desktop_index_from_cli(transcript, template)
+    dest = target.path / f"{local_session_id}.json"
+
+    if args.dry_run:
+        print(f"dry-run: would write index {dest}")
+        print(
+            "dry-run: "
+            f"cliSessionId={transcript.cli_session_id} title={transcript.title!r} "
+            f"cwd={transcript.cwd!r} completedTurns={transcript.completed_turns}"
+        )
+        return "index-written"
+
+    while dest.exists():
+        local_session_id, record = build_desktop_index_from_cli(transcript, template)
+        dest = target.path / f"{local_session_id}.json"
+    save_json(dest, record)
+    return "index-written"
 
 
 def scan(args: argparse.Namespace) -> int:
@@ -642,6 +821,86 @@ def sync(args: argparse.Namespace) -> int:
     return 0
 
 
+def adopt_cli(args: argparse.Namespace) -> int:
+    if not args.dry_run:
+        assert_claude_not_running(args.ignore_running)
+    if not args.all and not args.session:
+        raise SystemExit("Pass --session <cliSessionId> to adopt specific CLI sessions, or pass --all explicitly.")
+
+    target_app = expand_path(args.target_app_support_dir)
+    target_config = expand_path(args.target_claude_config_dir)
+    target_projects = target_config / "projects"
+    target = detect_target_index(args, target_app)
+    project_roots = collect_project_roots(args, target_config)
+    transcript_map = build_transcript_map(project_roots)
+    target_sessions = load_sessions([target], include_archived=True)
+    target_cli_ids = {s.cli_session_id for s in target_sessions if s.cli_session_id}
+    template = newest_template_record(target)
+
+    if args.session:
+        requested = list(dict.fromkeys(args.session))
+        missing = [session_id for session_id in requested if session_id not in transcript_map]
+        candidates = [(session_id, transcript_map[session_id]) for session_id in requested if session_id in transcript_map]
+    else:
+        missing = []
+        candidates = sorted(transcript_map.items(), key=lambda item: item[1].stat().st_mtime, reverse=True)
+        if args.limit:
+            candidates = candidates[: args.limit]
+
+    print(f"target index: {target.path}")
+    print(f"target projects: {target_projects}")
+    print(f"cli transcripts found: {len(transcript_map)}")
+    print(f"candidate transcripts: {len(candidates)}")
+    if missing:
+        print("missing requested transcripts:")
+        for session_id in missing:
+            print(f"  {session_id}")
+
+    backup = backup_target_index(target, expand_path(args.bridge_root), args.dry_run)
+    if backup:
+        print(f"backup: {backup}")
+
+    adopted = 0
+    already_indexed = 0
+    skipped: dict[str, int] = {}
+    for cli_id, path in candidates:
+        if cli_id in target_cli_ids:
+            already_indexed += 1
+            continue
+
+        transcript = parse_cli_transcript(path)
+        if transcript is None:
+            skipped["empty-or-unreadable-transcript"] = skipped.get("empty-or-unreadable-transcript", 0) + 1
+            continue
+        if not transcript.cwd and not args.allow_missing_cwd:
+            skipped["missing-cwd"] = skipped.get("missing-cwd", 0) + 1
+            continue
+
+        transcript_status = copy_cli_transcript_to_target(transcript, project_roots, target_projects, args)
+        if transcript_status == "transcript-conflict":
+            skipped[transcript_status] = skipped.get(transcript_status, 0) + 1
+            continue
+
+        index_status = write_adopted_index(transcript, target, template, args)
+        if index_status == "index-written":
+            adopted += 1
+            target_cli_ids.add(cli_id)
+
+    print(f"adopted cli sessions: {adopted}")
+    if already_indexed:
+        print(f"already indexed in target: {already_indexed}")
+    if skipped:
+        print("skipped:")
+        for key in sorted(skipped):
+            print(f"  {key}: {skipped[key]}")
+    if args.dry_run:
+        print("dry-run complete; no files were changed")
+    else:
+        print("adopt-cli complete; restart Claude Desktop before checking the Code tab")
+
+    return 1 if missing else 0
+
+
 def self_test(args: argparse.Namespace) -> int:
     import tempfile
 
@@ -655,11 +914,26 @@ def self_test(args: argparse.Namespace) -> int:
         source_index = source_app / "claude-code-sessions" / "old-account" / "old-workspace"
         target_index = target_app / "claude-code-sessions" / "new-account" / "new-workspace"
         source_project = source_config / "projects" / "-tmp-project"
+        cli_only_project = target_config / "projects" / "-tmp-cli-project"
         source_index.mkdir(parents=True)
         target_index.mkdir(parents=True)
         source_project.mkdir(parents=True)
+        cli_only_project.mkdir(parents=True)
         (target_app / "cowork-enabled-cli-ops.json").write_text('{"ownerAccountId":"new-account"}\n', encoding="utf-8")
         (target_app / "bridge-state.json").write_text('{"new-workspace:new-account":{}}\n', encoding="utf-8")
+        target_template = {
+            "sessionId": "local_template-session",
+            "cliSessionId": "template-cli-session",
+            "title": "Template session",
+            "cwd": str(tmp / "target-project"),
+            "originCwd": str(tmp / "target-project"),
+            "createdAt": 1,
+            "lastActivityAt": 1,
+            "isArchived": False,
+            "model": "claude-test",
+            "permissionMode": "ask",
+        }
+        save_json(target_index / "local_template-session.json", target_template)
         session = {
             "sessionId": "local_test-session",
             "cliSessionId": "cli-test-session",
@@ -672,6 +946,41 @@ def self_test(args: argparse.Namespace) -> int:
         save_json(source_index / "local_test-session.json", session)
         (source_project / "cli-test-session.jsonl").write_text(
             '{"type":"ai-title","sessionId":"cli-test-session","aiTitle":"Self test session"}\n',
+            encoding="utf-8",
+        )
+        (cli_only_project / "cli-only-session.jsonl").write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "user",
+                            "sessionId": "cli-only-session",
+                            "timestamp": "2026-01-01T00:00:00.000Z",
+                            "cwd": str(tmp / "cli-project"),
+                            "content": "hello",
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "assistant",
+                            "sessionId": "cli-only-session",
+                            "timestamp": "2026-01-01T00:00:01.000Z",
+                            "cwd": str(tmp / "cli-project"),
+                            "content": "world",
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "ai-title",
+                            "sessionId": "cli-only-session",
+                            "timestamp": "2026-01-01T00:00:02.000Z",
+                            "cwd": str(tmp / "cli-project"),
+                            "aiTitle": "CLI only self test",
+                        }
+                    ),
+                ]
+            )
+            + "\n",
             encoding="utf-8",
         )
 
@@ -699,13 +1008,38 @@ def self_test(args: argparse.Namespace) -> int:
             raise SystemExit(f"self-test failed: missing {expected_index}")
         if not expected_transcript.exists():
             raise SystemExit(f"self-test failed: missing {expected_transcript}")
+        adopt_args = argparse.Namespace(
+            bridge_root=str(state_root),
+            target_app_support_dir=str(target_app),
+            target_claude_config_dir=str(target_config),
+            target_index="",
+            source_claude_config_dir=[],
+            no_registered_profiles=True,
+            dry_run=False,
+            overwrite_transcript=False,
+            ignore_running=True,
+            session=["cli-only-session"],
+            all=False,
+            limit=0,
+            allow_missing_cwd=False,
+        )
+        adopt_cli(adopt_args)
+        adopted = [
+            load_json(path)
+            for path in target_index.glob("local_*.json")
+            if load_json(path).get("cliSessionId") == "cli-only-session"
+        ]
+        if len(adopted) != 1:
+            raise SystemExit(f"self-test failed: expected one adopted CLI session, found {len(adopted)}")
+        if adopted[0].get("title") != "CLI only self test":
+            raise SystemExit("self-test failed: adopted CLI title mismatch")
         print("self-test passed")
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Restore Claude Desktop Code session indexes and transcripts across accounts on macOS."
+        description="Restore or adopt Claude Desktop Code session indexes and transcripts on macOS."
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     parser.add_argument(
@@ -745,6 +1079,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument("--ignore-running", action="store_true")
     p_sync.add_argument("--session", default="", help="Import only this local session id or cliSessionId.")
     p_sync.set_defaults(func=sync)
+
+    p_adopt = sub.add_parser("adopt-cli", help="Make plain Claude Code CLI JSONL sessions appear in Desktop Code.")
+    p_adopt.add_argument("--target-app-support-dir", default=str(DEFAULT_APP_SUPPORT))
+    p_adopt.add_argument("--target-claude-config-dir", default=str(DEFAULT_CLAUDE_CONFIG))
+    p_adopt.add_argument("--target-index", default="")
+    p_adopt.add_argument("--source-claude-config-dir", action="append", default=[])
+    p_adopt.add_argument("--no-registered-profiles", action="store_true")
+    p_adopt.add_argument("--dry-run", action="store_true")
+    p_adopt.add_argument("--overwrite-transcript", action="store_true")
+    p_adopt.add_argument("--ignore-running", action="store_true")
+    p_adopt.add_argument("--session", action="append", default=[], help="Adopt this CLI session id. May be repeated.")
+    p_adopt.add_argument("--all", action="store_true", help="Adopt every non-indexed CLI transcript found.")
+    p_adopt.add_argument("--limit", type=int, default=0, help="With --all, adopt at most this many newest transcripts.")
+    p_adopt.add_argument("--allow-missing-cwd", action="store_true", help="Adopt transcripts without a cwd field.")
+    p_adopt.set_defaults(func=adopt_cli)
 
     p_verify = sub.add_parser("verify", help="Verify target Code session indexes have matching transcripts.")
     common(p_verify)

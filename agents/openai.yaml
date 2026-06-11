@@ -1,4 +1,4 @@
 interface:
   display_name: "Claude Desktop Code Session Restore"
-  short_description: "Restore macOS Desktop Code sessions"
-  default_prompt: "Use $claude-desktop-code-session-restore to restore prior Claude Desktop Code sessions into my current macOS Claude account."
+  short_description: "Restore or adopt macOS Desktop Code sessions"
+  default_prompt: "Use $claude-desktop-code-session-restore to restore prior Claude Desktop Code sessions or adopt Claude Code CLI sessions into my current macOS Claude account."
