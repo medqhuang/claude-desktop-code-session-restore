@@ -1,0 +1,18 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+
+# Local restore state and backups; never commit private Claude session data.
+.claude-code-session-bridge/
+pre-switch-backups/
+backups/
+projects/
+claude-code-sessions/
