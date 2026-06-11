@@ -1,46 +1,110 @@
 # Claude Desktop Code Session Restore
 
-Restore Claude Desktop **Code** sessions across Claude accounts or local profiles by safely copying the local Code sidebar index and matching Claude Code JSONL transcripts.
+Restore Claude Desktop **Code** sessions after switching Claude accounts or Desktop profiles, without copying login state.
 
-This is a Codex skill plus a standalone Python utility. It is for Claude Desktop's **Code tab**, not ordinary Claude Chat history.
+This repository contains:
 
-## The Pain Point
+- a Codex skill (`SKILL.md`)
+- a standalone Python restore utility (`scripts/claude_desktop_code_session_restore.py`)
 
-Claude Desktop Code sessions are local-first. When you switch Claude accounts, use a separate Desktop user-data profile, reinstall the app, or hit a Desktop storage migration edge case, sessions can disappear from the Code tab even though useful transcript data still exists on disk.
+It is for Claude Desktop's **Code** tab. It does not migrate ordinary Claude Chat history.
 
-The practical symptoms:
+## Why This Exists
 
-- A new Claude account opens with an empty or incomplete Code sidebar.
-- Old sessions still exist as local JSONL transcript files under `~/.claude/projects/`.
-- Copying cookies or IndexedDB would bring along login state and is unsafe.
-- Claude Desktop does not provide a documented "adopt these local Code sessions into this account" button.
+Claude Desktop Code sessions are stored locally. After switching accounts, using a different Desktop profile, reinstalling Claude, or hitting a Desktop storage migration bug, the Code sidebar may no longer show sessions that still exist on disk.
 
-This tool handles the narrow, useful case: the session transcript exists locally, and you want the current Claude Desktop Code account/profile to show it in the sidebar.
+Typical situation:
 
-## What It Does
+- You log into a new Claude account.
+- The Code sidebar is empty or missing old work.
+- The old transcripts still exist under `~/.claude/projects/`.
+- Copying `Cookies`, `IndexedDB`, or `Local Storage` would also copy login state, which is the wrong fix.
 
-The restore flow:
+This tool restores the local Code sidebar by copying only the Code session index and matching JSONL transcripts.
 
-1. Snapshots an old account/profile's local Code session index and transcripts.
-2. Detects the current target account/profile's Code session index directory.
-3. Copies active `local_*.json` session index entries into the target account/profile.
-4. Copies or verifies matching `.jsonl` transcripts.
-5. Leaves login state alone.
+## Fastest Use: Let an AI Agent Run It
 
-It never copies:
+The intended workflow is not "manually type ten commands." The intended workflow is:
 
-- `Cookies`
-- `Local Storage`
-- `IndexedDB`
-- `Session Storage`
-- OAuth/token files
-- ordinary Claude Chat history
+1. Clone this repository.
+2. Ask Codex, Claude Code, or another local coding agent to read `SKILL.md`.
+3. Let the agent run the restore script for you.
 
-## How Claude Desktop Code Stores Sessions
+Example prompt:
 
-Claude Desktop Code uses two local layers.
+```text
+Read ./SKILL.md and use this repo to restore my previous Claude Desktop Code sessions into the current Claude account.
+Do not copy cookies, IndexedDB, Local Storage, or any login state.
+First snapshot the old account/profile, then after I log into the new account and create one blank Code session, run the sync and verify steps.
+```
 
-### 1. Sidebar Index
+If the old account is still open, tell the agent:
+
+```text
+I am still on the old Claude account. Start with the snapshot step and stop when I need to log into the new account.
+```
+
+After you log into the new account and create one blank Code session, tell the agent:
+
+```text
+The new account has one blank Code session. Continue with dry-run, sync, and verify.
+```
+
+The agent should run these phases:
+
+```text
+snapshot --register
+scan
+sync --dry-run
+sync
+verify
+```
+
+## Manual Quick Start
+
+Clone the repo:
+
+```bash
+git clone https://github.com/medqhuang/claude-desktop-code-session-restore.git
+cd claude-desktop-code-session-restore
+```
+
+Run the self-test:
+
+```bash
+python3 scripts/claude_desktop_code_session_restore.py self-test
+```
+
+With the old account still available, fully quit Claude Desktop and snapshot it:
+
+```bash
+python3 scripts/claude_desktop_code_session_restore.py snapshot --register
+```
+
+Then:
+
+1. Open Claude Desktop.
+2. Log into the new account.
+3. Open the Code tab.
+4. Create one blank Code session.
+5. Fully quit Claude Desktop again.
+
+Dry-run, restore, and verify:
+
+```bash
+python3 scripts/claude_desktop_code_session_restore.py scan
+python3 scripts/claude_desktop_code_session_restore.py sync --dry-run
+python3 scripts/claude_desktop_code_session_restore.py sync
+python3 scripts/claude_desktop_code_session_restore.py verify
+```
+
+Reopen Claude Desktop. Old Code sessions should now appear in the new account's Code sidebar.
+
+## How It Works
+
+Claude Desktop Code uses two local storage layers.
+
+### 1. Desktop Code sidebar index
 
 On macOS:
 
@@ -48,196 +112,76 @@ On macOS:
 ~/Library/Application Support/Claude/claude-code-sessions/<accountId>/<workspaceId>/local_*.json
 ```
 
-On Windows, the same pattern lives under:
+On Windows:
 
 ```text
 %APPDATA%\Claude\claude-code-sessions\<accountId>\<workspaceId>\local_*.json
 ```
 
-On Linux, the default is:
+On Linux:
 
 ```text
 ~/.config/Claude/claude-code-sessions/<accountId>/<workspaceId>/local_*.json
 ```
 
-Each `local_*.json` file is a Desktop Code sidebar entry. The important bridge field is:
+Each `local_*.json` file is one sidebar entry. The key field is `cliSessionId`:
 
 ```json
 {
   "sessionId": "local_<desktop-session-id>",
-  "cliSessionId": "<jsonl-transcript-id>",
-  "title": "Sidebar title",
+  "cliSessionId": "<transcript-id>",
+  "title": "Review roadmap and task consolidation",
   "cwd": "/path/to/project",
   "lastActivityAt": 1781144564263,
   "isArchived": false
 }
 ```
 
-### 2. Transcript Data
+### 2. Claude Code transcript files
 
-Claude Code transcripts live under:
+The actual conversation transcript is stored as JSONL:
 
 ```text
 ~/.claude/projects/<encoded-cwd>/<cliSessionId>.jsonl
 ```
 
-The `cliSessionId` in the sidebar index maps to the JSONL filename. If either side is missing, the Desktop UI can show an empty/missing session or omit it from the sidebar.
+The Desktop sidebar file points at the transcript through `cliSessionId`. If the transcript exists but the sidebar index does not, the session can be missing from Claude Desktop even though the work is still on disk.
 
-## Installation
+This tool copies source `local_*.json` files into the current target account's index directory and ensures the matching `.jsonl` files are present.
 
-Clone this repository:
+## What Gets Copied
 
-```bash
-git clone https://github.com/medqhuang/claude-desktop-code-session-restore.git
-cd claude-desktop-code-session-restore
-```
+Copied or verified:
 
-Use the script directly:
+- `claude-code-sessions/<accountId>/<workspaceId>/local_*.json`
+- `~/.claude/projects/<encoded-cwd>/<cliSessionId>.jsonl`
 
-```bash
-python3 scripts/claude_desktop_code_session_restore.py --version
-```
+Never copied:
 
-To install it as a Codex skill, copy or symlink the repository into your Codex skills directory:
+- `Cookies`
+- `Local Storage`
+- `IndexedDB`
+- `Session Storage`
+- OAuth tokens
+- ordinary Claude Chat history
 
-```bash
-mkdir -p ~/.codex/skills
-ln -s "$PWD" ~/.codex/skills/claude-desktop-code-session-restore
-```
-
-If your Codex build uses `~/.agents/skills`, use:
-
-```bash
-mkdir -p ~/.agents/skills
-ln -s "$PWD" ~/.agents/skills/claude-desktop-code-session-restore
-```
-
-Then invoke it in Codex with:
-
-```text
-Use $claude-desktop-code-session-restore to restore my previous Claude Desktop Code sessions into the current account.
-```
-
-## Standard Account Switch Workflow
-
-### Step 1: Snapshot the Old Account
-
-While the old account is still available:
-
-1. Fully quit Claude Desktop.
-2. Run:
-
-```bash
-python3 scripts/claude_desktop_code_session_restore.py snapshot --register
-```
-
-This copies:
-
-```text
-claude-code-sessions/
-projects/
-```
-
-into:
-
-```text
-~/.claude-code-session-bridge/pre-switch-backups/<snapshot-name>/
-```
-
-and registers that snapshot as a future source profile.
-
-### Step 2: Create the New Account's Target Index
-
-1. Open Claude Desktop.
-2. Log into the new Claude account.
-3. Open the Code tab.
-4. Create one blank Code session.
-5. Fully quit Claude Desktop again.
-
-This lets Claude create:
-
-```text
-claude-code-sessions/<newAccountId>/<newWorkspaceId>/
-```
-
-The restore script uses that as the target.
-
-### Step 3: Inspect
-
-```bash
-python3 scripts/claude_desktop_code_session_restore.py scan
-```
-
-You should see at least:
-
-- one target index directory for the new account
-- one source index directory for the old account/snapshot
-- transcript roots under `~/.claude/projects` and any registered snapshots
-
-### Step 4: Dry Run
-
-```bash
-python3 scripts/claude_desktop_code_session_restore.py sync --dry-run
-```
-
-Check for:
-
-```text
-candidate sessions: N
-imported sessions: N
-```
-
-or, on repeat runs:
-
-```text
-already present in target: N
-```
-
-### Step 5: Restore
-
-```bash
-python3 scripts/claude_desktop_code_session_restore.py sync
-```
-
-The tool backs up the target index before writing:
-
-```text
-~/.claude-code-session-bridge/backups/<timestamp>/target-index/...
-```
-
-### Step 6: Verify
-
-```bash
-python3 scripts/claude_desktop_code_session_restore.py verify
-```
-
-Successful output looks like:
-
-```text
-verified sessions: total=12 ok=12 missing-cli=0 missing-transcript=0 empty=0
-```
-
-### Step 7: Reopen Claude Desktop
-
-Open Claude Desktop, go to Code, and check that prior sessions appear in the sidebar.
-
-## Commands
-
-### `scan`
-
-Print discovered app-support directories, transcript roots, target index, and session counts.
-
-```bash
-python3 scripts/claude_desktop_code_session_restore.py scan
-```
+## Command Reference
 
 ### `snapshot`
 
-Back up the current profile's Code session index and transcripts.
+Back up the current Claude Desktop Code index and transcripts.
 
 ```bash
 python3 scripts/claude_desktop_code_session_restore.py snapshot --register
 ```
+
+The snapshot is written to:
+
+```text
+~/.claude-code-session-bridge/pre-switch-backups/<name>/
+```
+
+Use this before logging out of the old account.
 
 Useful options:
 
@@ -249,20 +193,17 @@ Useful options:
 --ignore-running
 ```
 
-### `register-profile`
+### `scan`
 
-Register an already separated profile as a future source.
+Show detected target index, source indexes, transcript roots, and session counts.
 
 ```bash
-python3 scripts/claude_desktop_code_session_restore.py register-profile \
-  --name old-work \
-  --app-support-dir "$HOME/Library/Application Support/Claude-old" \
-  --claude-config-dir "$HOME/.claude-old"
+python3 scripts/claude_desktop_code_session_restore.py scan
 ```
 
 ### `sync`
 
-Copy active source `local_*.json` indexes into the current target account and ensure matching transcripts exist.
+Copy source sessions into the current target account/profile.
 
 ```bash
 python3 scripts/claude_desktop_code_session_restore.py sync --dry-run
@@ -286,15 +227,32 @@ Useful options:
 
 ### `verify`
 
-Check that the target account's Code session index files point to nonempty JSONL transcripts.
+Check that target sidebar entries point to nonempty JSONL transcripts.
 
 ```bash
 python3 scripts/claude_desktop_code_session_restore.py verify
 ```
 
+Healthy output:
+
+```text
+verified sessions: total=12 ok=12 missing-cli=0 missing-transcript=0 empty=0
+```
+
+### `register-profile`
+
+Register an already separated old profile as a future source.
+
+```bash
+python3 scripts/claude_desktop_code_session_restore.py register-profile \
+  --name old-work \
+  --app-support-dir "$HOME/Library/Application Support/Claude-old" \
+  --claude-config-dir "$HOME/.claude-old"
+```
+
 ### `self-test`
 
-Run a temporary, isolated migration test without touching real Claude data.
+Run an isolated temporary migration test. It does not touch your real Claude data.
 
 ```bash
 python3 scripts/claude_desktop_code_session_restore.py self-test
@@ -302,27 +260,55 @@ python3 scripts/claude_desktop_code_session_restore.py self-test
 
 ## Safety Model
 
-- `sync` and `snapshot` refuse to run while the Claude Desktop main process appears to be running.
-- Target index directories are backed up before write operations.
-- Existing target files are not overwritten unless explicitly requested.
+- `snapshot` and `sync` refuse to run while the Claude Desktop main process appears to be running.
+- `sync` backs up the target index before writing.
+- Existing target files are not overwritten unless you pass an explicit overwrite flag.
 - Archived sessions are skipped by default.
-- Missing transcripts cause sessions to be skipped unless explicitly allowed.
-- No browser/app login state is copied.
+- Sessions with missing transcripts are skipped by default.
+- Login state is never copied.
+
+Backups are written under:
+
+```text
+~/.claude-code-session-bridge/backups/
+```
 
 ## What This Cannot Restore
 
-This tool cannot recover sessions if the actual transcript payload is gone.
+This tool cannot recover a session if the transcript payload is gone.
 
 It cannot restore:
 
 - ordinary Claude Chat history
-- server-side account ownership
-- missing or deleted `.jsonl` transcripts
+- account ownership on Claude's servers
+- deleted `.jsonl` transcripts
 - live background processes
 - old account MCP/OAuth authorizations
-- attachments or remote resources that the new account cannot access
+- attachments or remote resources the new account cannot access
 
-It can make the new account/profile's Desktop Code sidebar point at local session transcripts that already exist.
+It only makes the current Claude Desktop Code sidebar point at local transcripts that already exist.
+
+## Install As A Codex Skill
+
+Clone the repo and symlink it into the Codex skills directory:
+
+```bash
+mkdir -p ~/.codex/skills
+ln -s "$PWD" ~/.codex/skills/claude-desktop-code-session-restore
+```
+
+Some Codex builds use `~/.agents/skills`:
+
+```bash
+mkdir -p ~/.agents/skills
+ln -s "$PWD" ~/.agents/skills/claude-desktop-code-session-restore
+```
+
+Then invoke:
+
+```text
+Use $claude-desktop-code-session-restore to restore my previous Claude Desktop Code sessions into the current account.
+```
 
 ## Version And Compatibility
 
@@ -338,29 +324,30 @@ Tested locally on:
 - Claude Desktop Code storage using `claude-code-sessions/<accountId>/<workspaceId>/local_*.json`
 - Claude Code transcripts under `~/.claude/projects/<encoded-cwd>/<cliSessionId>.jsonl`
 
-The script includes default path detection for macOS, Windows, and Linux, but the project was born from and verified against Claude Desktop on macOS. Claude Desktop internals are not a public stable API; run `snapshot`, `sync --dry-run`, and `verify` before relying on it.
-
-## Related Work And Prior Art
-
-This project is related to community discoveries around Claude Desktop Code's local session storage:
-
-- [anthropics/claude-code#58670](https://github.com/anthropics/claude-code/issues/58670) documents that Desktop Code sidebar entries are `local_*.json` files containing `cliSessionId` fields that map to `~/.claude/projects/.../*.jsonl`.
-- [anthropics/claude-code#29373](https://github.com/anthropics/claude-code/issues/29373) documents a migration issue from `local-agent-mode-sessions` to `claude-code-sessions` and a workaround that copies `local_*.json`.
-- [d-kimuson/claude-code-viewer](https://github.com/d-kimuson/claude-code-viewer), [jhlee0409/claude-code-history-viewer](https://github.com/jhlee0409/claude-code-history-viewer), and similar tools read JSONL transcripts for viewing/searching.
-
-The narrower goal here is account/profile restore for Claude Desktop Code's own sidebar, without copying login state.
-
-## Development
-
-Run the isolated self-test:
+The script has default path detection for macOS, Windows, and Linux. The storage layout is not a public stable API, so always run:
 
 ```bash
 python3 scripts/claude_desktop_code_session_restore.py self-test
+python3 scripts/claude_desktop_code_session_restore.py sync --dry-run
+python3 scripts/claude_desktop_code_session_restore.py verify
 ```
 
-Run a syntax check without writing `__pycache__`:
+## Related Work
+
+This project builds on public observations about Claude Desktop Code's local session storage:
+
+- [anthropics/claude-code#58670](https://github.com/anthropics/claude-code/issues/58670) documents that Desktop Code sidebar entries are `local_*.json` files containing `cliSessionId` fields that map to `~/.claude/projects/.../*.jsonl`.
+- [anthropics/claude-code#29373](https://github.com/anthropics/claude-code/issues/29373) documents a migration issue from `local-agent-mode-sessions` to `claude-code-sessions` and a workaround that copies `local_*.json`.
+- [d-kimuson/claude-code-viewer](https://github.com/d-kimuson/claude-code-viewer), [jhlee0409/claude-code-history-viewer](https://github.com/jhlee0409/claude-code-history-viewer), and similar projects read JSONL transcripts for viewing and search.
+
+This repository focuses on a narrower problem: restoring Claude Desktop Code's own sidebar across local accounts/profiles without copying login state.
+
+## Development
+
+Run tests:
 
 ```bash
+python3 scripts/claude_desktop_code_session_restore.py self-test
 python3 -B -m py_compile scripts/claude_desktop_code_session_restore.py
 ```
 
