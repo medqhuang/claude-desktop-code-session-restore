@@ -1,6 +1,6 @@
 # Claude Desktop Code Session Restore
 
-Restore Claude Desktop **Code** sessions on macOS after switching Claude accounts or Desktop profiles, or make plain Claude Code CLI sessions appear in Claude Desktop Code, without copying login state.
+Restore Claude Desktop **Code** sessions on macOS after switching Claude accounts or Desktop profiles, make plain Claude Code CLI sessions appear in Claude Desktop Code, or turn a Desktop Code session into a plain Claude Code CLI resume command, without copying login state.
 
 This repository contains:
 
@@ -133,6 +133,14 @@ python3 scripts/claude_desktop_code_session_restore.py verify --session <cliSess
 ```
 
 `<cliSessionId>` is the `.jsonl` filename without `.jsonl` under `~/.claude/projects/<encoded-cwd>/`.
+
+To take one Desktop Code session into the plain Claude Code CLI, look it up by title and print the resume command:
+
+```bash
+python3 scripts/claude_desktop_code_session_restore.py export-cli --title "my session title"
+```
+
+This is read-only on the same machine: the Desktop transcript already lives under `~/.claude/projects`, so `export-cli` just resolves the session's `cliSessionId` and `cwd` and prints the exact `cd <cwd> && claude --resume <cliSessionId>` command. Run that command to continue the conversation in the terminal. Desktop can stay open. To copy the transcript into a different CLI config dir first (a separate `CLAUDE_CONFIG_DIR` or profile), add `--to-config-dir <path>` (use `--dry-run` first).
 
 ## How It Works
 
@@ -312,6 +320,35 @@ Notes:
 - It skips CLI transcripts that are already indexed in the target Desktop account.
 - It skips empty transcripts and, by default, transcripts without a `cwd` field.
 
+### `export-cli`
+
+Print the Claude Code CLI command to resume a Desktop Code session. This is the inverse of `adopt-cli`.
+
+```bash
+python3 scripts/claude_desktop_code_session_restore.py export-cli --title "my session title"
+python3 scripts/claude_desktop_code_session_restore.py export-cli --session <cliSessionId>
+python3 scripts/claude_desktop_code_session_restore.py export-cli --all --limit 10
+```
+
+On the same machine this is read-only. Because the Desktop transcript already lives under `~/.claude/projects/<encoded-cwd>/<cliSessionId>.jsonl` — the exact file the CLI resumes from — `export-cli` only reads the Desktop index to resolve `cliSessionId` and `cwd`, then prints `cd <cwd> && claude --resume <cliSessionId>`. It does not modify the Desktop index, so it is safe to run while Claude Desktop is open.
+
+Select sessions with `--session` (Desktop `local_...` id or `cliSessionId`, repeatable), `--title` (case-insensitive substring, repeatable), or `--all`.
+
+Useful options:
+
+```bash
+--session <local_id-or-cliSessionId>
+--title <substring>
+--all
+--limit <n>
+--include-archived
+--to-config-dir <path>
+--overwrite-transcript
+--dry-run
+```
+
+`--to-config-dir <path>` also copies each transcript into that CLI config dir's `projects/` (for a different `CLAUDE_CONFIG_DIR` or profile); the printed command is then prefixed with `CLAUDE_CONFIG_DIR=<path>`. Without it, nothing is written. Use `--dry-run` to preview copies.
+
 ### `verify`
 
 Check that target sidebar entries point to nonempty JSONL transcripts.
@@ -421,7 +458,7 @@ Use $claude-desktop-code-session-restore to restore my previous Claude Desktop C
 Current version:
 
 ```text
-0.2.0
+0.3.0
 ```
 
 Supported and tested on:
@@ -430,6 +467,7 @@ Supported and tested on:
 - Claude Desktop Code storage using `claude-code-sessions/<accountId>/<workspaceId>/local_*.json`
 - Claude Code transcripts under `~/.claude/projects/<encoded-cwd>/<cliSessionId>.jsonl`
 - CLI-only Claude Code JSONL adoption into Desktop Code via `adopt-cli`
+- Desktop Code sessions exported to a Claude Code CLI resume command via `export-cli`
 
 The storage layout is not a public stable API. Always run the relevant checks:
 

@@ -6,6 +6,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -30,7 +31,7 @@ DEFAULT_STATE_ROOT = Path(
         Path.home() / ".claude-desktop-code-session-restore",
     )
 )
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 
 @dataclass(frozen=True)
@@ -146,6 +147,21 @@ def safe_rel(path: Path, root: Path) -> Path:
         return path.resolve().relative_to(root.resolve())
     except ValueError:
         return Path(path.name)
+
+
+def resume_command(cwd: str | None, cli_session_id: str, config_dir: Path | None = None) -> str:
+    """Build the shell command that resumes a session in the Claude Code CLI.
+
+    The transcript is the same JSONL the Desktop Code entry points at, so resuming
+    is just `claude --resume <cliSessionId>` run from the session's cwd. A non-default
+    CLI config dir is passed through CLAUDE_CONFIG_DIR.
+    """
+    cmd = f"claude --resume {shlex.quote(cli_session_id)}"
+    if config_dir is not None:
+        cmd = f"CLAUDE_CONFIG_DIR={shlex.quote(str(config_dir))} {cmd}"
+    if cwd:
+        cmd = f"cd {shlex.quote(cwd)} && {cmd}"
+    return cmd
 
 
 def load_json(path: Path) -> dict:
@@ -901,6 +917,147 @@ def adopt_cli(args: argparse.Namespace) -> int:
     return 1 if missing else 0
 
 
+def copy_transcript_to_config(
+    transcript_path: Path,
+    project_roots: list[Path],
+    dest_config: Path,
+    args: argparse.Namespace,
+) -> str:
+    source_root = next(
+        (root for root in project_roots if root.exists() and path_is_relative_to(transcript_path, root)),
+        None,
+    )
+    rel = safe_rel(transcript_path, source_root) if source_root else Path(transcript_path.name)
+    dest = dest_config / "projects" / rel
+    existed_before = dest.exists()
+
+    if dest.resolve() == transcript_path.resolve():
+        return "transcript-already-in-target"
+    if dest.exists():
+        if same_file_content(transcript_path, dest):
+            return "transcript-exists-identical"
+        if not args.overwrite_transcript:
+            return "transcript-conflict"
+
+    if args.dry_run:
+        action = "overwrite" if dest.exists() else "copy"
+        print(f"  dry-run: would {action} transcript {transcript_path} -> {dest}")
+        return "transcript-copied"
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(transcript_path, dest)
+    return "transcript-overwritten" if existed_before else "transcript-copied"
+
+
+def export_cli(args: argparse.Namespace) -> int:
+    """Scenario three: turn a Claude Desktop Code session into a CLI resume command.
+
+    The Desktop transcript already lives under ~/.claude/projects, so on the same
+    machine/config this is read-only: it looks up cliSessionId + cwd from the Desktop
+    index and prints `claude --resume ...`. Pass --to-config-dir to also copy the
+    transcript into a different CLI config dir (a separate CLAUDE_CONFIG_DIR/profile).
+    """
+    target_app = expand_path(args.target_app_support_dir)
+    target_config = expand_path(args.target_claude_config_dir)
+    target = detect_target_index(args, target_app)
+    project_roots = collect_project_roots(args, target_config)
+
+    to_config_dir = expand_path(args.to_config_dir) if args.to_config_dir else None
+    copy_requested = to_config_dir is not None and to_config_dir.resolve() != target_config.resolve()
+
+    requested = list(dict.fromkeys(args.session)) if args.session else []
+    title_selectors = [t.lower() for t in (args.title or []) if t]
+    if not args.all and not requested and not title_selectors:
+        raise SystemExit(
+            "Pass --session <local id|cliSessionId> and/or --title <substring> to export "
+            "specific Desktop Code sessions, or pass --all explicitly."
+        )
+
+    sessions = load_sessions([target], include_archived=args.include_archived)
+
+    def is_selected(record: SessionRecord) -> bool:
+        if args.all:
+            return True
+        if record.session_id in requested or (record.cli_session_id and record.cli_session_id in requested):
+            return True
+        if title_selectors and any(t in record.title.lower() for t in title_selectors):
+            return True
+        return False
+
+    chosen_all = [r for r in sessions if is_selected(r)]
+    matched_ids = {r.session_id for r in chosen_all}
+    matched_ids |= {r.cli_session_id for r in chosen_all if r.cli_session_id}
+    missing_selectors = [s for s in requested if s not in matched_ids]
+    chosen = chosen_all[: args.limit] if args.limit else chosen_all
+
+    print(f"desktop index: {target.path}")
+    print("transcript roots:")
+    for root in project_roots:
+        print(f"  - {root}")
+    if copy_requested:
+        print(f"copy transcripts into: {to_config_dir / 'projects'}")
+    shown = f" (showing {len(chosen)})" if len(chosen) != len(chosen_all) else ""
+    print(f"matched sessions: {len(chosen_all)}{shown}")
+    if missing_selectors:
+        print("no desktop session matched:")
+        for sel in missing_selectors:
+            print(f"  {sel}")
+
+    ok = 0
+    missing_cli = 0
+    missing_transcript = 0
+    empty = 0
+    copied = 0
+    copy_conflict = 0
+    for record in chosen:
+        title = record.title or "(untitled)"
+        cli_id = record.cli_session_id
+        if not cli_id:
+            missing_cli += 1
+            print(f"\n- {title}\n  skip: no cliSessionId in {record.path.name}")
+            continue
+        cwd = record.data.get("cwd") or record.data.get("originCwd")
+        transcript = find_transcript(cli_id, project_roots)
+        if not transcript:
+            missing_transcript += 1
+            print(f"\n- {title}\n  skip: no transcript {cli_id}.jsonl under transcript roots")
+            continue
+        if transcript.stat().st_size == 0:
+            empty += 1
+            print(f"\n- {title}\n  skip: empty transcript {transcript}")
+            continue
+
+        if copy_requested:
+            status = copy_transcript_to_config(transcript, project_roots, to_config_dir, args)
+            if status == "transcript-conflict":
+                copy_conflict += 1
+                print(f"\n- {title}\n  skip: transcript already differs in {to_config_dir}; pass --overwrite-transcript")
+                continue
+            if status in {"transcript-copied", "transcript-overwritten"}:
+                copied += 1
+
+        ok += 1
+        print(f"\n- {title}")
+        print(f"  cliSessionId: {cli_id}")
+        print(f"  cwd: {cwd or '(unknown)'}")
+        if cwd and not Path(cwd).exists():
+            print("  note: cwd path is missing on this machine; recreate it or cd elsewhere before resuming")
+        print(f"  resume: {resume_command(cwd, cli_id, to_config_dir if copy_requested else None)}")
+
+    summary = (
+        f"\nexport summary: matched={len(chosen_all)} resumable={ok} "
+        f"missing-cli={missing_cli} missing-transcript={missing_transcript} empty={empty}"
+    )
+    if copy_requested:
+        summary += f" copied={copied} copy-conflict={copy_conflict}"
+    print(summary)
+    if args.dry_run and copy_requested:
+        print("dry-run complete; no files were changed")
+    if missing_selectors or missing_cli or missing_transcript or empty or copy_conflict:
+        return 1
+    return 0
+
+
 def self_test(args: argparse.Namespace) -> int:
     import tempfile
 
@@ -1033,6 +1190,31 @@ def self_test(args: argparse.Namespace) -> int:
             raise SystemExit(f"self-test failed: expected one adopted CLI session, found {len(adopted)}")
         if adopted[0].get("title") != "CLI only self test":
             raise SystemExit("self-test failed: adopted CLI title mismatch")
+
+        # Scenario three: export a Desktop session back into a CLI resume command.
+        export_args = argparse.Namespace(
+            bridge_root=str(state_root),
+            target_app_support_dir=str(target_app),
+            target_claude_config_dir=str(target_config),
+            target_index="",
+            source_app_support_dir=[],
+            source_claude_config_dir=[],
+            no_registered_profiles=True,
+            include_archived=False,
+            session=["cli-only-session"],
+            title=[],
+            all=False,
+            limit=0,
+            to_config_dir="",
+            overwrite_transcript=False,
+            dry_run=False,
+        )
+        if export_cli(export_args) != 0:
+            raise SystemExit("self-test failed: export-cli could not resume the adopted CLI session")
+        cmd = resume_command(str(tmp / "cli-project"), "cli-only-session", None)
+        if "claude --resume cli-only-session" not in cmd or not cmd.startswith("cd "):
+            raise SystemExit(f"self-test failed: unexpected resume command: {cmd}")
+
         print("self-test passed")
     return 0
 
@@ -1094,6 +1276,28 @@ def build_parser() -> argparse.ArgumentParser:
     p_adopt.add_argument("--limit", type=int, default=0, help="With --all, adopt at most this many newest transcripts.")
     p_adopt.add_argument("--allow-missing-cwd", action="store_true", help="Adopt transcripts without a cwd field.")
     p_adopt.set_defaults(func=adopt_cli)
+
+    p_export = sub.add_parser(
+        "export-cli",
+        help="Print the Claude Code CLI command to resume a Desktop Code session; optionally copy its transcript into another CLI config dir.",
+    )
+    common(p_export)
+    p_export.add_argument(
+        "--session", action="append", default=[], help="Export this Desktop local session id or cliSessionId. May be repeated."
+    )
+    p_export.add_argument(
+        "--title", action="append", default=[], help="Export Desktop sessions whose title contains this substring (case-insensitive). May be repeated."
+    )
+    p_export.add_argument("--all", action="store_true", help="Export every active Desktop Code session.")
+    p_export.add_argument("--limit", type=int, default=0, help="Show at most this many newest matched sessions.")
+    p_export.add_argument(
+        "--to-config-dir",
+        default="",
+        help="Copy each transcript into this CLI config dir's projects/ (for a different CLAUDE_CONFIG_DIR or profile).",
+    )
+    p_export.add_argument("--overwrite-transcript", action="store_true")
+    p_export.add_argument("--dry-run", action="store_true")
+    p_export.set_defaults(func=export_cli)
 
     p_verify = sub.add_parser("verify", help="Verify target Code session indexes have matching transcripts.")
     common(p_verify)
