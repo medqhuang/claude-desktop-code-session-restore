@@ -31,7 +31,7 @@ DEFAULT_STATE_ROOT = Path(
         Path.home() / ".claude-desktop-code-session-restore",
     )
 )
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 
 
 @dataclass(frozen=True)
@@ -487,16 +487,6 @@ def parse_cli_transcript(path: Path) -> CliTranscript | None:
     )
 
 
-def find_transcript(cli_session_id: str, project_roots: list[Path]) -> Path | None:
-    for root in project_roots:
-        if not root.exists():
-            continue
-        candidate_matches = list(root.rglob(f"{cli_session_id}.jsonl"))
-        if candidate_matches:
-            return candidate_matches[0]
-    return None
-
-
 def backup_target_index(target: IndexDir, bridge_root: Path, dry_run: bool) -> Path | None:
     if not target.path.exists():
         return None
@@ -590,9 +580,17 @@ def build_desktop_index_from_cli(transcript: CliTranscript, template: SessionRec
         }
     )
 
-    # These fields are specific to scheduled/running Desktop tasks and should
-    # not be inherited when adopting a plain CLI transcript.
-    for key in ("scheduledTaskId", "planPath"):
+    # These fields are specific to the template session itself — scheduled/running
+    # task state, per-session permission grants, and MCP tool enablement — and
+    # must not be inherited when adopting a plain CLI transcript.
+    for key in (
+        "scheduledTaskId",
+        "planPath",
+        "sessionPermissionUpdates",
+        "alwaysAllowedReasons",
+        "enabledMcpTools",
+        "remoteMcpServersConfig",
+    ):
         record.pop(key, None)
     return local_session_id, record
 
@@ -679,7 +677,7 @@ def scan(args: argparse.Namespace) -> int:
     print(f"transcripts found: {len(transcript_map)}")
     print("index dirs:")
     for index in index_dirs:
-        sessions = load_sessions([index], include_archived=args.include_archived)
+        sessions = load_sessions([index], include_archived=True)
         active = sum(1 for s in sessions if not s.is_archived)
         archived = sum(1 for s in sessions if s.is_archived)
         marker = " (target)" if target and index.path.resolve() == target.path.resolve() else ""
@@ -743,6 +741,7 @@ def verify(args: argparse.Namespace) -> int:
     sessions = load_sessions([target], include_archived=True)
     if args.session:
         sessions = [s for s in sessions if s.session_id == args.session or s.cli_session_id == args.session]
+    transcript_map = build_transcript_map(project_roots)
 
     ok = 0
     missing_cli = 0
@@ -754,7 +753,7 @@ def verify(args: argparse.Namespace) -> int:
             missing_cli += 1
             print(f"missing cliSessionId: {record.path}")
             continue
-        transcript = find_transcript(cli_id, project_roots)
+        transcript = transcript_map.get(cli_id)
         if not transcript:
             missing_transcript += 1
             print(f"missing transcript: {record.path} cliSessionId={cli_id}")
@@ -988,6 +987,12 @@ def export_cli(args: argparse.Namespace) -> int:
     matched_ids = {r.session_id for r in chosen_all}
     matched_ids |= {r.cli_session_id for r in chosen_all if r.cli_session_id}
     missing_selectors = [s for s in requested if s not in matched_ids]
+    if not args.all:
+        missing_selectors += [
+            raw
+            for raw in (args.title or [])
+            if raw and not any(raw.lower() in r.title.lower() for r in chosen_all)
+        ]
     chosen = chosen_all[: args.limit] if args.limit else chosen_all
 
     print(f"desktop index: {target.path}")
@@ -1003,6 +1008,8 @@ def export_cli(args: argparse.Namespace) -> int:
         for sel in missing_selectors:
             print(f"  {sel}")
 
+    transcript_map = build_transcript_map(project_roots)
+
     ok = 0
     missing_cli = 0
     missing_transcript = 0
@@ -1017,7 +1024,7 @@ def export_cli(args: argparse.Namespace) -> int:
             print(f"\n- {title}\n  skip: no cliSessionId in {record.path.name}")
             continue
         cwd = record.data.get("cwd") or record.data.get("originCwd")
-        transcript = find_transcript(cli_id, project_roots)
+        transcript = transcript_map.get(cli_id)
         if not transcript:
             missing_transcript += 1
             print(f"\n- {title}\n  skip: no transcript {cli_id}.jsonl under transcript roots")
@@ -1027,17 +1034,17 @@ def export_cli(args: argparse.Namespace) -> int:
             print(f"\n- {title}\n  skip: empty transcript {transcript}")
             continue
 
+        print(f"\n- {title}")
         if copy_requested:
             status = copy_transcript_to_config(transcript, project_roots, to_config_dir, args)
             if status == "transcript-conflict":
                 copy_conflict += 1
-                print(f"\n- {title}\n  skip: transcript already differs in {to_config_dir}; pass --overwrite-transcript")
+                print(f"  skip: transcript already differs in {to_config_dir}; pass --overwrite-transcript")
                 continue
             if status in {"transcript-copied", "transcript-overwritten"}:
                 copied += 1
 
         ok += 1
-        print(f"\n- {title}")
         print(f"  cliSessionId: {cli_id}")
         print(f"  cwd: {cwd or '(unknown)'}")
         if cwd and not Path(cwd).exists():
@@ -1089,6 +1096,9 @@ def self_test(args: argparse.Namespace) -> int:
             "isArchived": False,
             "model": "claude-test",
             "permissionMode": "ask",
+            "sessionPermissionUpdates": [{"toolName": "Bash", "behavior": "allow"}],
+            "alwaysAllowedReasons": {"Bash": "template grant"},
+            "enabledMcpTools": ["template-mcp-tool"],
         }
         save_json(target_index / "local_template-session.json", target_template)
         session = {
@@ -1190,6 +1200,13 @@ def self_test(args: argparse.Namespace) -> int:
             raise SystemExit(f"self-test failed: expected one adopted CLI session, found {len(adopted)}")
         if adopted[0].get("title") != "CLI only self test":
             raise SystemExit("self-test failed: adopted CLI title mismatch")
+        leaked = [
+            key
+            for key in ("sessionPermissionUpdates", "alwaysAllowedReasons", "enabledMcpTools")
+            if key in adopted[0]
+        ]
+        if leaked:
+            raise SystemExit(f"self-test failed: adopted session inherited template state: {leaked}")
 
         # Scenario three: export a Desktop session back into a CLI resume command.
         export_args = argparse.Namespace(

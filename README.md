@@ -1,10 +1,16 @@
 # Claude Desktop Code Session Restore
 
-Restore Claude Desktop **Code** sessions on macOS after switching Claude accounts or Desktop profiles, make plain Claude Code CLI sessions appear in Claude Desktop Code, or turn a Desktop Code session into a plain Claude Code CLI resume command, without copying login state.
+Bridge Claude Desktop **Code** sessions and plain Claude Code CLI sessions on macOS, without copying login state. It covers three scenarios:
+
+| Scenario | Commands |
+| --- | --- |
+| The Code sidebar lost sessions after switching Claude accounts or Desktop profiles | `snapshot --register`, then `sync` |
+| Make a plain Claude Code CLI session appear in Desktop Code | `adopt-cli` |
+| Continue a Desktop Code session in the plain Claude Code CLI | `export-cli` |
 
 This repository contains:
 
-- a Codex skill (`SKILL.md`)
+- an agent skill (`SKILL.md`) for Codex, Claude Code, and similar coding agents
 - a standalone Python restore utility (`scripts/claude_desktop_code_session_restore.py`)
 
 It is for Claude Desktop's **Code** tab. It does not migrate ordinary Claude Chat history.
@@ -12,6 +18,8 @@ It is for Claude Desktop's **Code** tab. It does not migrate ordinary Claude Cha
 ## Support Status
 
 This release is **macOS-only**.
+
+The script needs Python 3.9 or newer and uses only the standard library; the macOS system `python3` works, and there is nothing to install.
 
 It was built and tested against Claude Desktop for macOS, where Code sessions are stored under `~/Library/Application Support/Claude` and transcripts are stored under `~/.claude/projects`.
 
@@ -132,7 +140,11 @@ python3 scripts/claude_desktop_code_session_restore.py adopt-cli --session <cliS
 python3 scripts/claude_desktop_code_session_restore.py verify --session <cliSessionId>
 ```
 
-`<cliSessionId>` is the `.jsonl` filename without `.jsonl` under `~/.claude/projects/<encoded-cwd>/`.
+`<cliSessionId>` is the `.jsonl` filename without `.jsonl` under `~/.claude/projects/<encoded-cwd>/`. To find a recent one, list transcripts newest-first:
+
+```bash
+ls -t ~/.claude/projects/<encoded-cwd>/*.jsonl | head
+```
 
 To take one Desktop Code session into the plain Claude Code CLI, look it up by title and print the resume command:
 
@@ -172,6 +184,8 @@ The actual conversation transcript is stored as JSONL:
 ```text
 ~/.claude/projects/<encoded-cwd>/<cliSessionId>.jsonl
 ```
+
+`<encoded-cwd>` is the session's working directory with every non-alphanumeric character (`/`, `.`, `_`, ...) replaced by `-`; for example `/Users/you/work/my_app` becomes `-Users-you-work-my-app`. The encoding is lossy, so the transcript's own `cwd` field is the authoritative path.
 
 The Desktop sidebar file points at the transcript through `cliSessionId`. If the transcript exists but the sidebar index does not, the session can be missing from Claude Desktop even though the work is still on disk.
 
@@ -216,6 +230,10 @@ When opening an issue or sharing logs, redact:
 
 Global options must appear before the subcommand:
 
+- `--state-root <path>`: where restore state, backups, and registered profiles live. Defaults to `~/.claude-desktop-code-session-restore`, or the `CLAUDE_DESKTOP_CODE_SESSION_RESTORE_HOME` environment variable if set.
+- `--allow-unsupported-platform`: allow restore commands outside macOS. Experimental; use explicit paths.
+- `--version`: print the tool version.
+
 ```bash
 python3 scripts/claude_desktop_code_session_restore.py --state-root <path> sync --dry-run
 python3 scripts/claude_desktop_code_session_restore.py --allow-unsupported-platform scan --target-app-support-dir <path> --target-claude-config-dir <path>
@@ -237,15 +255,15 @@ The snapshot is written to:
 
 Use this before logging out of the old account.
 
+A snapshot is a full copy of `claude-code-sessions` and your entire `~/.claude/projects` directory, which can be large. If disk space is tight, check first with `du -sh ~/.claude/projects`.
+
 Useful options:
 
-```bash
---name old-work-20260611
---register
---dry-run
---force
---ignore-running
-```
+- `--name <name>`: snapshot name; defaults to `profile-<timestamp>`.
+- `--register`: also register the snapshot as a future `sync` source.
+- `--dry-run`: print what would be copied without writing.
+- `--force`: overwrite an existing snapshot with the same name.
+- `--ignore-running`: skip the Claude-Desktop-running check. Risky; see Safety Model.
 
 ### `scan`
 
@@ -266,18 +284,13 @@ python3 scripts/claude_desktop_code_session_restore.py sync
 
 Useful options:
 
-```bash
---include-archived
---session local_<id>
---session <cliSessionId>
---overwrite-index
---overwrite-transcript
---allow-missing-transcript
---target-app-support-dir <path>
---target-claude-config-dir <path>
---source-app-support-dir <path>
---source-claude-config-dir <path>
-```
+- `--include-archived`: also import sessions marked archived.
+- `--session <id>`: import only this session, by Desktop `local_...` id or `cliSessionId`.
+- `--overwrite-index`: replace target `local_*.json` files whose content differs from the source.
+- `--overwrite-transcript`: replace target `.jsonl` transcripts whose content differs from the source.
+- `--allow-missing-transcript`: import an index entry even if its transcript is missing or conflicts; the target's existing transcript, if any, is kept.
+- `--target-app-support-dir <path>` / `--target-claude-config-dir <path>`: explicit target locations.
+- `--source-app-support-dir <path>` / `--source-claude-config-dir <path>`: explicit extra sources; repeatable.
 
 ### `adopt-cli`
 
@@ -305,18 +318,16 @@ python3 scripts/claude_desktop_code_session_restore.py adopt-cli --all
 
 Useful options:
 
-```bash
---source-claude-config-dir <path>
---overwrite-transcript
---allow-missing-cwd
---limit <n>
---ignore-running
-```
+- `--source-claude-config-dir <path>`: also scan this CLI config dir for transcripts; repeatable.
+- `--overwrite-transcript`: replace a differing transcript copy in the target `projects/`.
+- `--allow-missing-cwd`: adopt transcripts that never recorded a `cwd`.
+- `--limit <n>`: with `--all`, adopt at most this many newest transcripts.
+- `--ignore-running`: skip the Claude-Desktop-running check. Risky; see Safety Model.
 
 Notes:
 
 - `adopt-cli` refuses to run without either `--session <cliSessionId>` or explicit `--all`.
-- It uses the newest target Desktop `local_*.json` as a schema template, then replaces `sessionId`, `cliSessionId`, title, cwd, timestamps, and turn count.
+- It uses the newest target Desktop `local_*.json` as a schema template, then replaces `sessionId`, `cliSessionId`, title, cwd, timestamps, and turn count. Template-specific state — per-session permission grants, MCP tool enablement, and scheduled-task fields — is stripped, not inherited.
 - It skips CLI transcripts that are already indexed in the target Desktop account.
 - It skips empty transcripts and, by default, transcripts without a `cwd` field.
 
@@ -332,22 +343,16 @@ python3 scripts/claude_desktop_code_session_restore.py export-cli --all --limit 
 
 On the same machine this is read-only. Because the Desktop transcript already lives under `~/.claude/projects/<encoded-cwd>/<cliSessionId>.jsonl` — the exact file the CLI resumes from — `export-cli` only reads the Desktop index to resolve `cliSessionId` and `cwd`, then prints `cd <cwd> && claude --resume <cliSessionId>`. It does not modify the Desktop index, so it is safe to run while Claude Desktop is open.
 
-Select sessions with `--session` (Desktop `local_...` id or `cliSessionId`, repeatable), `--title` (case-insensitive substring, repeatable), or `--all`.
-
 Useful options:
 
-```bash
---session <local_id-or-cliSessionId>
---title <substring>
---all
---limit <n>
---include-archived
---to-config-dir <path>
---overwrite-transcript
---dry-run
-```
-
-`--to-config-dir <path>` also copies each transcript into that CLI config dir's `projects/` (for a different `CLAUDE_CONFIG_DIR` or profile); the printed command is then prefixed with `CLAUDE_CONFIG_DIR=<path>`. Without it, nothing is written. Use `--dry-run` to preview copies.
+- `--session <id>`: Desktop `local_...` id or `cliSessionId`; repeatable.
+- `--title <substring>`: case-insensitive title match; repeatable.
+- `--all`: every active Desktop Code session.
+- `--include-archived`: include archived sessions in the pool.
+- `--limit <n>`: show at most this many newest matches.
+- `--to-config-dir <path>`: also copy each transcript into this CLI config dir's `projects/` (for a different `CLAUDE_CONFIG_DIR` or profile); the printed resume command is then prefixed with `CLAUDE_CONFIG_DIR=<path>`.
+- `--overwrite-transcript`: with `--to-config-dir`, replace differing copies.
+- `--dry-run`: with `--to-config-dir`, preview copies without writing.
 
 ### `verify`
 
@@ -382,6 +387,17 @@ Run an isolated temporary migration test. It does not touch your real Claude dat
 python3 scripts/claude_desktop_code_session_restore.py self-test
 ```
 
+## Exit Codes
+
+Every command exits `0` on success and `1` on a fatal abort (unsupported platform, Claude Desktop still running, no target index found). In addition:
+
+- `verify` exits `1` if any checked session lacks a `cliSessionId`, lacks a transcript, or has an empty transcript.
+- `adopt-cli` exits `1` if any requested `--session` has no matching CLI transcript.
+- `export-cli` exits `1` if any selector matched nothing, any matched session could not be resolved to a resume command, or a `--to-config-dir` copy hit a conflict.
+- `scan` and `snapshot` exit `0` once they run. `sync` also exits `0` even when sessions were skipped; check the printed `imported`/`skipped` summary.
+
+Agents driving this tool should check both the exit code and the summary line.
+
 ## Safety Model
 
 - `snapshot`, `sync`, and real `adopt-cli` writes refuse to run while the Claude Desktop main process appears to be running. `adopt-cli --dry-run` is read-only.
@@ -396,6 +412,8 @@ Backups are written under:
 ```text
 ~/.claude-desktop-code-session-restore/backups/
 ```
+
+Each real `sync` or `adopt-cli` run adds a new timestamped backup; nothing is pruned automatically. Old directories under `backups/` and `pre-switch-backups/` are safe to delete once you no longer need them.
 
 The tool also stores registered source profiles under:
 
@@ -431,7 +449,7 @@ It cannot restore:
 
 It only makes the current Claude Desktop Code sidebar point at local transcripts that already exist.
 
-## Install As A Codex Skill
+## Install As A Skill
 
 Clone the repo and symlink it into the Codex skills directory:
 
@@ -447,6 +465,13 @@ mkdir -p ~/.agents/skills
 ln -s "$PWD" ~/.agents/skills/claude-desktop-code-session-restore
 ```
 
+The same `SKILL.md` also works as a Claude Code personal skill:
+
+```bash
+mkdir -p ~/.claude/skills
+ln -s "$PWD" ~/.claude/skills/claude-desktop-code-session-restore
+```
+
 Then invoke:
 
 ```text
@@ -458,7 +483,7 @@ Use $claude-desktop-code-session-restore to restore my previous Claude Desktop C
 Current version:
 
 ```text
-0.3.0
+0.3.1
 ```
 
 Supported and tested on:
@@ -469,19 +494,7 @@ Supported and tested on:
 - CLI-only Claude Code JSONL adoption into Desktop Code via `adopt-cli`
 - Desktop Code sessions exported to a Claude Code CLI resume command via `export-cli`
 
-The storage layout is not a public stable API. Always run the relevant checks:
-
-```bash
-python3 scripts/claude_desktop_code_session_restore.py self-test
-python3 scripts/claude_desktop_code_session_restore.py sync --dry-run
-python3 scripts/claude_desktop_code_session_restore.py verify
-```
-
-For CLI adoption, replace the sync dry-run with:
-
-```bash
-python3 scripts/claude_desktop_code_session_restore.py adopt-cli --session <cliSessionId> --dry-run
-```
+The storage layout is not a public stable API. Before trusting a restore, run `self-test`, the relevant `--dry-run`, and `verify`, as shown in the quick start above.
 
 On non-macOS systems, restore commands fail fast by default. You can pass `--allow-unsupported-platform` for experiments with explicit paths, but that path is not supported by this release.
 
@@ -503,6 +516,8 @@ Run tests:
 python3 scripts/claude_desktop_code_session_restore.py self-test
 python3 -B -m py_compile scripts/claude_desktop_code_session_restore.py
 ```
+
+When cutting a release, bump `VERSION` in `scripts/claude_desktop_code_session_restore.py` and the version in this README together.
 
 ## License
 
